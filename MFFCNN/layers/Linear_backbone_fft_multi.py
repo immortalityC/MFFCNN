@@ -18,10 +18,13 @@ class Inception_Block_V1(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.num_kernels = num_kernels
+        self.pool =  nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+
 
         kernels = []
         for i in range(self.num_kernels):
-            kernels.append(nn.Conv2d(in_channels, out_channels, kernel_size=2 * i + 1, padding=i))
+            kernels.append(nn.Conv2d(in_channels, out_channels, kernel_size=2 * (i+1) + 1, padding=i+1))
+
 
 
         self.kernels = nn.ModuleList(kernels)
@@ -36,10 +39,18 @@ class Inception_Block_V1(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
+
+
+
         res_list = []
         for i in range(self.num_kernels):
             res_list.append(self.kernels[i](x))
+
+
         res = torch.stack(res_list, dim=-1).mean(-1)
+
+
+
         return res
 
 
@@ -53,9 +64,9 @@ class patching(nn.Module):
     def __init__(self, patch, stride, seq_len, enc_in, batch_size,use_norm,dorpout):
         super(patching, self).__init__()
         self.conv = nn.Sequential(
-            Inception_Block_V1(enc_in, enc_in*2 , num_kernels=3),
+            Inception_Block_V1(enc_in, enc_in , num_kernels=1),
             nn.GELU(),
-            Inception_Block_V1(enc_in*2 , enc_in, num_kernels=3)
+            # Inception_Block_V1(enc_in , enc_in, num_kernels=1)
         ).to('cuda')
 
         self.conv_ch = nn.Sequential(
@@ -82,6 +93,7 @@ class patching(nn.Module):
         self.i_flatten = nn.Flatten(start_dim=-2)
         self.BatchNorm1d_2 = nn.BatchNorm2d(self.enc_in)
         self.i_linear = nn.Linear(2 * self.patch * (patch_num+1), self.seq_len)
+
         if self.padding_patch == 'end':
             self.padding_patch_layer = nn.ReplicationPad1d((0, stride))
             self.patch_num += 1
@@ -99,16 +111,16 @@ class patching(nn.Module):
         # x = self.drop(x)
 
         x_2 = x
-        x = self.relu(x)
+
 
 
 
         x = x.permute(0, 2, 1, 3)
         in_channels = x.size(1)
         self.conv_ch = nn.Sequential(
-            Inception_Block_V1(in_channels, in_channels, num_kernels=6),
+            Inception_Block_V1(in_channels, in_channels, num_kernels=1),
             nn.GELU(),
-            Inception_Block_V1(in_channels, in_channels, num_kernels=6)
+            # Inception_Block_V1(in_channels, in_channels, num_kernels=1)
         ).to('cuda')
         x = self.conv_ch(x)
         # x = self.drop(x)
@@ -222,18 +234,19 @@ class Model(nn.Module):
 
 
         self.i_linear_1 = nn.Linear(2 * self.seq_len, self.seq_len)
+        self.i_linear_2 = nn.Linear(self.seq_len, self.seq_len)
         self.h_L = False
         self.path = True
 
-        self.Linear3 = nn.Linear(3*self.seq_len, self.seq_len)
+        self.Linear3 = nn.Linear(4*self.seq_len, self.seq_len)
         self.layer_norm = nn.LayerNorm(self.seq_len)
 
 
-        self.patching1 = patching(7,7, self.seq_len, self.enc_in, self.batch_size,self.use_norm,self.dropout)
-        self.patching2 = patching(42,42, self.seq_len, self.enc_in, self.batch_size,self.use_norm,self.dropout)
-        self.patching3 = patching(112,112, self.seq_len, self.enc_in, self.batch_size,self.use_norm,self.dropout)
-        # self.patching4 = patching(319, 319, self.seq_len, self.enc_in, self.batch_size,self.use_norm)
-        # self.patching5 = patching(168, 168, self.seq_len, self.enc_in, self.batch_size, self.use_norm)
+        self.patching1 = patching(12,12, self.seq_len, self.enc_in, self.batch_size,self.use_norm,self.dropout)
+        self.patching2 = patching(8,8, self.seq_len, self.enc_in, self.batch_size,self.use_norm,self.dropout)
+        self.patching3 = patching(4,4, self.seq_len, self.enc_in, self.batch_size,self.use_norm,self.dropout)
+        self.patching4 = patching(21, 21, self.seq_len, self.enc_in, self.batch_size, self.use_norm, self.dropout)
+        self.patching5 = patching(112, 112, self.seq_len, self.enc_in, self.batch_size, self.use_norm, self.dropout)
 
         self.convs = nn.ModuleList()
 
@@ -256,27 +269,34 @@ class Model(nn.Module):
 
             x1= self.patching1(x1)
             x11 = x1 +org
-
-
-            x2= self.patching2(x2)
-            x22 =x2+org
-
-
             #
+            #
+            x2= self.patching2(x2)
+            x22 = x2+org
+            #
+            #
+            # #
             x3 = self.patching3(x3)
             x33 = x3+org
-
-
-
             #
+            #
+            #
+            # #
             # x4 = self.patching4(x4)
+            # x44 = x4+org
+            # #
+            # # x5 = self.patching5(x5)
+            # # x55 = org+x5
+            #
+            x_all = x11+x22+x33
 
-            # x5 = self.patching5(x5)
-            # x5 = org+x4
+            x_cat = torch.cat((x1,x2,x3,x_all),dim=2)
 
-            x = torch.cat((x11,x22,x33),dim=2)
-            x = self.Linear3(x)
-            x = self.drop(x)
+
+            x_cat = self.Linear3(x_cat)
+
+            x = org+x_cat+x_all
+
 
             if self.nl:
                 x = self.relu(x)
@@ -295,11 +315,12 @@ class Model(nn.Module):
                 x = torch.cat((x, org), dim=-1)
                 x = self.i_linear_1(x)
                 x = self.relu(x)
+                # x = self.i_linear_2(x)
                 x = self.drop(x)
                 x = org + x
                 if self.use_norm:
                     x = self.layer_norm(x)
-
+            #
             x = x.permute(0, 2, 1)
 
 
